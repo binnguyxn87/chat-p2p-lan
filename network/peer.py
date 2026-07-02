@@ -10,6 +10,8 @@ class Peer:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind(("0.0.0.0", listen_port))
         self.server_socket.listen(5)
+        self.encrypt_hook = None   # hàm mã hóa - B sẽ gán vào sau
+        self.decrypt_hook = None   # hàm giải mã - B sẽ gán vào sau
 
     def start_listening(self):
         print(f"[{self.my_name}] Đang lắng nghe tại cổng {self.listen_port}...")
@@ -44,7 +46,11 @@ class Peer:
                 continue
 
             if msg:
-                print(f"\n[{msg['sender']}] ({msg['type']}): {msg['payload']}")
+                if msg['type'] == "MESSAGE" and self.decrypt_hook:
+                    content = self.decrypt_hook(msg['payload'], addr)
+                else:
+                    content = msg['payload']
+                print(f"\n[{msg['sender']}] ({msg['type']}): {content}")
 
     def _remove_connection(self, addr):
         if addr in self.connections:
@@ -75,7 +81,8 @@ class Peer:
         if addr not in self.connections:
             print(f"[LỖI] Chưa kết nối tới {addr}")
             return False
-        packet = create_message("MESSAGE", self.my_name, text)
+        payload = self.encrypt_hook(text, addr) if self.encrypt_hook else text
+        packet = create_message("MESSAGE", self.my_name, payload)
         try:
             self.connections[addr].send(packet.encode('utf-8'))
             return True
@@ -85,9 +92,10 @@ class Peer:
             return False
 
     def broadcast(self, text):
-        packet = create_message("MESSAGE", self.my_name, text)
         dead_peers = []
         for addr, conn in list(self.connections.items()):
+            payload = self.encrypt_hook(text, addr) if self.encrypt_hook else text
+            packet = create_message("MESSAGE", self.my_name, payload)
             try:
                 conn.send(packet.encode('utf-8'))
             except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
