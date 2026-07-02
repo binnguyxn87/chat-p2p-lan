@@ -43,6 +43,7 @@ while True:
     parts = cmd.split(" ", 3)
 
     if parts[0] == "exit":
+        peer.shutdown()
         break
     elif parts[0] == "connect" and len(parts) == 3:
         peer.connect_to(parts[1], int(parts[2]))

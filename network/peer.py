@@ -6,63 +6,107 @@ class Peer:
     def __init__(self, my_name, listen_port):
         self.my_name = my_name
         self.listen_port = listen_port
-        self.connections = {}   # lưu các kết nối đang mở: {địa_chỉ: socket_object}
+        self.connections = {}
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind(("0.0.0.0", listen_port))
-        self.server_socket.listen(5)   # cho phép tối đa 5 kết nối chờ trong hàng đợi
+        self.server_socket.listen(5)
 
     def start_listening(self):
-        """Chạy nền, liên tục chấp nhận kết nối mới từ các peer khác"""
         print(f"[{self.my_name}] Đang lắng nghe tại cổng {self.listen_port}...")
         while True:
-            conn, addr = self.server_socket.accept()
+            try:
+                conn, addr = self.server_socket.accept()
+            except OSError:
+                break
             print(f"[{self.my_name}] Kết nối mới từ {addr}")
             self.connections[addr] = conn
-            # Mỗi kết nối mới -> 1 thread riêng để nhận tin nhắn, không chặn các kết nối khác
             t = threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True)
             t.start()
 
     def _handle_connection(self, conn, addr):
-        """Xử lý nhận tin nhắn liên tục từ 1 peer cụ thể"""
         while True:
             try:
                 data = conn.recv(1024)
-                if not data:
-                    print(f"[{self.my_name}] {addr} đã ngắt kết nối.")
-                    del self.connections[addr]
-                    break
-                msg = parse_message(data.decode('utf-8'))
-                if msg:
-                    print(f"\n[{msg['sender']}] ({msg['type']}): {msg['payload']}")
-            except:
+            except (ConnectionResetError, ConnectionAbortedError, OSError):
+                print(f"\n[{self.my_name}] Mất kết nối với {addr} (lỗi mạng).")
+                self._remove_connection(addr)
                 break
 
+            if not data:
+                print(f"\n[{self.my_name}] {addr} đã ngắt kết nối.")
+                self._remove_connection(addr)
+                break
+
+            try:
+                msg = parse_message(data.decode('utf-8'))
+            except UnicodeDecodeError:
+                print(f"[{self.my_name}] Nhận dữ liệu lỗi (không đọc được) từ {addr}, bỏ qua.")
+                continue
+
+            if msg:
+                print(f"\n[{msg['sender']}] ({msg['type']}): {msg['payload']}")
+
+    def _remove_connection(self, addr):
+        if addr in self.connections:
+            try:
+                self.connections[addr].close()
+            except:
+                pass
+            del self.connections[addr]
+
     def connect_to(self, ip, port):
-        """Chủ động kết nối tới 1 peer khác"""
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((ip, port))
         addr = (ip, port)
+        if addr in self.connections:
+            return
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        try:
+            s.connect((ip, port))
+        except (socket.timeout, ConnectionRefusedError, OSError) as e:
+            print(f"[LỖI] Không kết nối được tới {addr}: {e}")
+            return
+        s.settimeout(None)
         self.connections[addr] = s
         t = threading.Thread(target=self._handle_connection, args=(s, addr), daemon=True)
         t.start()
         print(f"[{self.my_name}] Đã kết nối tới {addr}")
 
     def send_message(self, addr, text):
-        """Gửi tin nhắn tới 1 peer cụ thể (addr là tuple (ip, port))"""
         if addr not in self.connections:
             print(f"[LỖI] Chưa kết nối tới {addr}")
-            return
+            return False
         packet = create_message("MESSAGE", self.my_name, text)
-        self.connections[addr].send(packet.encode('utf-8'))
+        try:
+            self.connections[addr].send(packet.encode('utf-8'))
+            return True
+        except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
+            print(f"[LỖI] Không gửi được tới {addr}, có thể đã ngắt kết nối.")
+            self._remove_connection(addr)
+            return False
 
     def broadcast(self, text):
-        """Gửi tin nhắn tới TẤT CẢ peer đang kết nối"""
         packet = create_message("MESSAGE", self.my_name, text)
+        dead_peers = []
         for addr, conn in list(self.connections.items()):
             try:
                 conn.send(packet.encode('utf-8'))
-            except:
-                pass
+            except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
+                dead_peers.append(addr)
+        for addr in dead_peers:
+            self._remove_connection(addr)
 
     def list_peers(self):
         return list(self.connections.keys())
+    def shutdown(self):
+        """Đóng tất cả kết nối và socket lắng nghe một cách lịch sự trước khi thoát"""
+        for addr, conn in list(self.connections.items()):
+            try:
+                conn.close()
+            except:
+                pass
+        self.connections.clear()
+        try:
+            self.server_socket.close()
+        except:
+            pass
+        print(f"[{self.my_name}] Đã đóng toàn bộ kết nối và thoát.")
