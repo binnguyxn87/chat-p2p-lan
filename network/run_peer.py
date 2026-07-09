@@ -1,144 +1,56 @@
-import socket
+import sys
 import threading
-from protocol import create_message, parse_message
+from peer import Peer
+from discovery import Discovery
 
-class Peer:
-    def __init__(self, my_name, listen_port):
-        self.my_name = my_name
-        self.listen_port = listen_port
-        self.connections = {}
+if len(sys.argv) < 3:
+    print("Cách dùng: python run_peer.py <ten> <cong_lang_nghe>")
+    sys.exit(1)
 
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind(("0.0.0.0", listen_port))
-        self.server_socket.listen(5)
+name = sys.argv[1]
+port = int(sys.argv[2])
 
-        # Hooks / callback để B (mã hóa) và C (UI) cắm vào mà không cần sửa file này
-        self.encrypt_hook = None            # (text, addr) -> ciphertext
-        self.decrypt_hook = None            # (ciphertext, addr) -> text
-        self.on_message_received = None     # (sender_name, content, addr) -> None
-        self.on_peer_connected = None       # (addr) -> None
-        self.on_peer_disconnected = None    # (addr) -> None
+peer = Peer(name, port)
 
-    # ---------- LẮNG NGHE & KẾT NỐI ----------
+def handle_peer_found(peer_name, ip, tcp_port):
+    addr = (ip, tcp_port)
+    if addr in peer.connections:
+        return
+    try:
+        peer.connect_to(ip, tcp_port)
+        print(f"\n[TỰ ĐỘNG] Đã phát hiện và kết nối tới {peer_name} tại {addr}")
+    except Exception:
+        pass
 
-    def start_listening(self):
-        print(f"[{self.my_name}] Đang lắng nghe tại cổng {self.listen_port}...")
-        while True:
-            try:
-                conn, addr = self.server_socket.accept()
-            except OSError:
-                break
-            print(f"[{self.my_name}] Kết nối mới từ {addr}")
-            self.connections[addr] = conn
-            if self.on_peer_connected:
-                self.on_peer_connected(addr)
-            t = threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True)
-            t.start()
+listen_thread = threading.Thread(target=peer.start_listening, daemon=True)
+listen_thread.start()
 
-    def connect_to(self, ip, port):
-        addr = (ip, port)
-        if addr in self.connections:
-            return
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(5)
-        try:
-            s.connect((ip, port))
-        except (socket.timeout, ConnectionRefusedError, OSError) as e:
-            print(f"[LỖI] Không kết nối được tới {addr}: {e}")
-            return
-        s.settimeout(None)
-        self.connections[addr] = s
-        if self.on_peer_connected:
-            self.on_peer_connected(addr)
-        t = threading.Thread(target=self._handle_connection, args=(s, addr), daemon=True)
-        t.start()
-        print(f"[{self.my_name}] Đã kết nối tới {addr}")
+discovery = Discovery(name, port, handle_peer_found)
+discovery.start()
 
-    # ---------- NHẬN DỮ LIỆU ----------
+print("Lệnh dùng được:")
+print("  connect <ip> <port>          - ket noi thu cong toi 1 peer")
+print("  send <ip> <port> <noi dung>  - gui tin nhan rieng")
+print("  broadcast <noi dung>         - gui cho tat ca peer dang ket noi")
+print("  list                         - xem danh sach peer dang ket noi")
+print("  exit                         - thoat")
 
-    def _handle_connection(self, conn, addr):
-        while True:
-            try:
-                data = conn.recv(1024)
-            except (ConnectionResetError, ConnectionAbortedError, OSError):
-                print(f"\n[{self.my_name}] Mất kết nối với {addr} (lỗi mạng).")
-                self._remove_connection(addr)
-                break
+while True:
+    cmd = input(">> ").strip()
+    if cmd == "":
+        continue
+    parts = cmd.split(" ", 3)
 
-            if not data:
-                print(f"\n[{self.my_name}] {addr} đã ngắt kết nối.")
-                self._remove_connection(addr)
-                break
-
-            try:
-                msg = parse_message(data.decode('utf-8'))
-            except UnicodeDecodeError:
-                print(f"[{self.my_name}] Nhận dữ liệu lỗi (không đọc được) từ {addr}, bỏ qua.")
-                continue
-
-            if msg:
-                if msg['type'] == "MESSAGE" and self.decrypt_hook:
-                    content = self.decrypt_hook(msg['payload'], addr)
-                else:
-                    content = msg['payload']
-
-                if self.on_message_received:
-                    self.on_message_received(msg['sender'], content, addr)
-                else:
-                    print(f"\n[{msg['sender']}] ({msg['type']}): {content}")
-
-    def _remove_connection(self, addr):
-        if addr in self.connections:
-            try:
-                self.connections[addr].close()
-            except:
-                pass
-            del self.connections[addr]
-            if self.on_peer_disconnected:
-                self.on_peer_disconnected(addr)
-
-    # ---------- GỬI DỮ LIỆU ----------
-
-    def send_message(self, addr, text):
-        if addr not in self.connections:
-            print(f"[LỖI] Chưa kết nối tới {addr}")
-            return False
-        payload = self.encrypt_hook(text, addr) if self.encrypt_hook else text
-        packet = create_message("MESSAGE", self.my_name, payload)
-        try:
-            self.connections[addr].send(packet.encode('utf-8'))
-            return True
-        except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
-            print(f"[LỖI] Không gửi được tới {addr}, có thể đã ngắt kết nối.")
-            self._remove_connection(addr)
-            return False
-
-    def broadcast(self, text):
-        dead_peers = []
-        for addr, conn in list(self.connections.items()):
-            payload = self.encrypt_hook(text, addr) if self.encrypt_hook else text
-            packet = create_message("MESSAGE", self.my_name, payload)
-            try:
-                conn.send(packet.encode('utf-8'))
-            except (ConnectionResetError, ConnectionAbortedError, OSError, BrokenPipeError):
-                dead_peers.append(addr)
-        for addr in dead_peers:
-            self._remove_connection(addr)
-
-    # ---------- TIỆN ÍCH ----------
-
-    def list_peers(self):
-        return list(self.connections.keys())
-
-    def shutdown(self):
-        for addr, conn in list(self.connections.items()):
-            try:
-                conn.close()
-            except:
-                pass
-        self.connections.clear()
-        try:
-            self.server_socket.close()
-        except:
-            pass
-        print(f"[{self.my_name}] Đã đóng toàn bộ kết nối và thoát.")
+    if parts[0] == "exit":
+        peer.shutdown()
+        break
+    elif parts[0] == "connect" and len(parts) == 3:
+        peer.connect_to(parts[1], int(parts[2]))
+    elif parts[0] == "send" and len(parts) == 4:
+        peer.send_message((parts[1], int(parts[2])), parts[3])
+    elif parts[0] == "broadcast" and len(parts) >= 2:
+        peer.broadcast(cmd[len("broadcast "):])
+    elif parts[0] == "list":
+        print(peer.list_peers())
+    else:
+        print("Lệnh không hợp lệ hoặc thiếu tham số.")
