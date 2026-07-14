@@ -1,6 +1,4 @@
 """
-Ngày phát triển: Ngày 4-5 (Tuần 1)
- 
 CHỨC NĂNG:
 - Sinh khóa AES-256 ngẫu nhiên (dùng làm khóa phiên - session key)
 - Mã hóa/giải mã nội dung tin nhắn bằng AES-256-GCM
