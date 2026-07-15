@@ -7,11 +7,17 @@ class Peer:
         self.my_name = my_name
         self.listen_port = listen_port
         self.connections = {}
+
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind(("0.0.0.0", listen_port))
         self.server_socket.listen(5)
-        self.encrypt_hook = None   # hàm mã hóa - B sẽ gán vào sau
-        self.decrypt_hook = None   # hàm giải mã - B sẽ gán vào sau
+
+        self.encrypt_hook = None
+        self.decrypt_hook = None
+        self.on_message_received = None
+        self.on_peer_connected = None      # gọi dạng on_peer_connected(addr, is_initiator)
+        self.on_peer_disconnected = None
+        self.crypto_bridge = None
 
     def start_listening(self):
         print(f"[{self.my_name}] Đang lắng nghe tại cổng {self.listen_port}...")
@@ -22,8 +28,29 @@ class Peer:
                 break
             print(f"[{self.my_name}] Kết nối mới từ {addr}")
             self.connections[addr] = conn
+            if self.on_peer_connected:
+                self.on_peer_connected(addr, False)   # bị động - KHÔNG tự tạo khóa
             t = threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True)
             t.start()
+
+    def connect_to(self, ip, port):
+        addr = (ip, port)
+        if addr in self.connections:
+            return
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        try:
+            s.connect((ip, port))
+        except (socket.timeout, ConnectionRefusedError, OSError) as e:
+            print(f"[LỖI] Không kết nối được tới {addr}: {e}")
+            return
+        s.settimeout(None)
+        self.connections[addr] = s
+        if self.on_peer_connected:
+            self.on_peer_connected(addr, True)   # chủ động - ĐƯỢC tạo khóa
+        t = threading.Thread(target=self._handle_connection, args=(s, addr), daemon=True)
+        t.start()
+        print(f"[{self.my_name}] Đã kết nối tới {addr}")
 
     def _handle_connection(self, conn, addr):
         while True:
@@ -46,11 +73,20 @@ class Peer:
                 continue
 
             if msg:
+                if msg['type'] in ("PUBKEY", "KEY_EXCHANGE"):
+                    if self.crypto_bridge:
+                        self.crypto_bridge.handle_control_message(msg['type'], msg['sender'], msg['payload'], addr)
+                    continue
+
                 if msg['type'] == "MESSAGE" and self.decrypt_hook:
                     content = self.decrypt_hook(msg['payload'], addr)
                 else:
                     content = msg['payload']
-                print(f"\n[{msg['sender']}] ({msg['type']}): {content}")
+
+                if self.on_message_received:
+                    self.on_message_received(msg['sender'], content, addr)
+                else:
+                    print(f"\n[{msg['sender']}] ({msg['type']}): {content}")
 
     def _remove_connection(self, addr):
         if addr in self.connections:
@@ -59,23 +95,8 @@ class Peer:
             except:
                 pass
             del self.connections[addr]
-
-    def connect_to(self, ip, port):
-        addr = (ip, port)
-        if addr in self.connections:
-            return
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(5)
-        try:
-            s.connect((ip, port))
-        except (socket.timeout, ConnectionRefusedError, OSError) as e:
-            print(f"[LỖI] Không kết nối được tới {addr}: {e}")
-            return
-        s.settimeout(None)
-        self.connections[addr] = s
-        t = threading.Thread(target=self._handle_connection, args=(s, addr), daemon=True)
-        t.start()
-        print(f"[{self.my_name}] Đã kết nối tới {addr}")
+            if self.on_peer_disconnected:
+                self.on_peer_disconnected(addr)
 
     def send_message(self, addr, text):
         if addr not in self.connections:
@@ -105,8 +126,8 @@ class Peer:
 
     def list_peers(self):
         return list(self.connections.keys())
+
     def shutdown(self):
-        """Đóng tất cả kết nối và socket lắng nghe một cách lịch sự trước khi thoát"""
         for addr, conn in list(self.connections.items()):
             try:
                 conn.close()

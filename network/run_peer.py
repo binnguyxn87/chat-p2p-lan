@@ -2,6 +2,7 @@ import sys
 import threading
 from peer import Peer
 from discovery import Discovery
+from crypto_bridge import CryptoBridge
 
 if len(sys.argv) < 3:
     print("Cách dùng: python run_peer.py <ten> <cong_lang_nghe>")
@@ -11,17 +12,17 @@ name = sys.argv[1]
 port = int(sys.argv[2])
 
 peer = Peer(name, port)
+peer.crypto_bridge = CryptoBridge(peer)
 
-# Hàm này sẽ được Discovery gọi ngược lại mỗi khi tìm thấy 1 peer mới
 def handle_peer_found(peer_name, ip, tcp_port):
     addr = (ip, tcp_port)
     if addr in peer.connections:
-        return   # đã kết nối rồi, không kết nối lại
+        return
     try:
         peer.connect_to(ip, tcp_port)
         print(f"\n[TỰ ĐỘNG] Đã phát hiện và kết nối tới {peer_name} tại {addr}")
-    except Exception as e:
-        pass   # có thể do 2 peer cùng lúc thử connect nhau, bỏ qua lỗi trùng
+    except Exception:
+        pass
 
 listen_thread = threading.Thread(target=peer.start_listening, daemon=True)
 listen_thread.start()
