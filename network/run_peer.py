@@ -2,6 +2,7 @@ import sys
 import threading
 from peer import Peer
 from discovery import Discovery
+from crypto_bridge import CryptoBridge
 
 if len(sys.argv) < 3:
     print("Cách dùng: python run_peer.py <ten> <cong_lang_nghe>")
@@ -11,6 +12,7 @@ name = sys.argv[1]
 port = int(sys.argv[2])
 
 peer = Peer(name, port)
+peer.crypto_bridge = CryptoBridge(peer)
 
 def handle_peer_found(peer_name, ip, tcp_port):
     addr = (ip, tcp_port)

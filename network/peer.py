@@ -12,14 +12,12 @@ class Peer:
         self.server_socket.bind(("0.0.0.0", listen_port))
         self.server_socket.listen(5)
 
-        # Hooks / callback để B (mã hóa) và C (UI) cắm vào mà không cần sửa file này
-        self.encrypt_hook = None            # (text, addr) -> ciphertext
-        self.decrypt_hook = None            # (ciphertext, addr) -> text
-        self.on_message_received = None     # (sender_name, content, addr) -> None
-        self.on_peer_connected = None       # (addr) -> None
-        self.on_peer_disconnected = None    # (addr) -> None
-
-    # ---------- LẮNG NGHE & KẾT NỐI ----------
+        self.encrypt_hook = None
+        self.decrypt_hook = None
+        self.on_message_received = None
+        self.on_peer_connected = None      # gọi dạng on_peer_connected(addr, is_initiator)
+        self.on_peer_disconnected = None
+        self.crypto_bridge = None
 
     def start_listening(self):
         print(f"[{self.my_name}] Đang lắng nghe tại cổng {self.listen_port}...")
@@ -31,7 +29,7 @@ class Peer:
             print(f"[{self.my_name}] Kết nối mới từ {addr}")
             self.connections[addr] = conn
             if self.on_peer_connected:
-                self.on_peer_connected(addr)
+                self.on_peer_connected(addr, False)   # bị động - KHÔNG tự tạo khóa
             t = threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True)
             t.start()
 
@@ -49,12 +47,10 @@ class Peer:
         s.settimeout(None)
         self.connections[addr] = s
         if self.on_peer_connected:
-            self.on_peer_connected(addr)
+            self.on_peer_connected(addr, True)   # chủ động - ĐƯỢC tạo khóa
         t = threading.Thread(target=self._handle_connection, args=(s, addr), daemon=True)
         t.start()
         print(f"[{self.my_name}] Đã kết nối tới {addr}")
-
-    # ---------- NHẬN DỮ LIỆU ----------
 
     def _handle_connection(self, conn, addr):
         while True:
@@ -77,6 +73,11 @@ class Peer:
                 continue
 
             if msg:
+                if msg['type'] in ("PUBKEY", "KEY_EXCHANGE"):
+                    if self.crypto_bridge:
+                        self.crypto_bridge.handle_control_message(msg['type'], msg['sender'], msg['payload'], addr)
+                    continue
+
                 if msg['type'] == "MESSAGE" and self.decrypt_hook:
                     content = self.decrypt_hook(msg['payload'], addr)
                 else:
@@ -96,8 +97,6 @@ class Peer:
             del self.connections[addr]
             if self.on_peer_disconnected:
                 self.on_peer_disconnected(addr)
-
-    # ---------- GỬI DỮ LIỆU ----------
 
     def send_message(self, addr, text):
         if addr not in self.connections:
@@ -124,8 +123,6 @@ class Peer:
                 dead_peers.append(addr)
         for addr in dead_peers:
             self._remove_connection(addr)
-
-    # ---------- TIỆN ÍCH ----------
 
     def list_peers(self):
         return list(self.connections.keys())
