@@ -18,6 +18,10 @@ def handle_peer_found(peer_name, ip, tcp_port):
     addr = (ip, tcp_port)
     if addr in peer.connections:
         return
+    # QUY TẮC TIE-BREAKING: chỉ bên có cổng lắng nghe NHỎ HƠN mới chủ động
+    # kết nối, tránh 2 bên cùng lúc connect() lẫn nhau tạo ra 2 kết nối trùng.
+    if port >= tcp_port:
+        return
     try:
         peer.connect_to(ip, tcp_port)
         print(f"\n[TỰ ĐỘNG] Đã phát hiện và kết nối tới {peer_name} tại {addr}")
