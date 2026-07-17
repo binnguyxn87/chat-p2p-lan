@@ -1,67 +1,69 @@
-import base64
-import json
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from crypto.rsa_utils import generate_rsa_keypair, rsa_encrypt, rsa_decrypt
-from crypto.aes_utils import generate_aes_key, aes_encrypt, aes_decrypt
+from crypto.rsa_utils import generate_rsa_keypair
+from crypto.aes_utils import aes_encrypt
 from crypto.signature_utils import sign_message, verify_signature
+from session.session_manager import SessionManager
+from session import protocol as sp
 
 
 class CryptoBridge:
+    """
+    Cầu nối giữa module Networking (A) và module Bảo mật (B).
+    Dùng đúng SessionManager/PeerSession và session.protocol do B viết để
+    quản lý trạng thái bắt tay và đóng gói dữ liệu mã hóa.
+    """
+
     def __init__(self, peer):
         self.peer = peer
         self.private_key, self.public_key = generate_rsa_keypair()
-        self.peer_public_keys = {}
-        self.session_keys = {}
-        self.ready = {}
-        self.is_initiator = {}   # addr -> True nếu mình là bên chủ động connect_to
+        self.manager = SessionManager()
 
         peer.encrypt_hook = self._encrypt
         peer.decrypt_hook = self._decrypt
         peer.on_peer_connected = self._on_peer_connected
         peer.on_peer_disconnected = self._on_peer_disconnected
 
+    def _pid(self, addr):
+        return f"{addr[0]}:{addr[1]}"
+
+    # ---------- BẮT TAY ----------
+
     def _on_peer_connected(self, addr, is_initiator):
-        self.ready[addr] = False
-        self.is_initiator[addr] = is_initiator
-        pub_pem = self.public_key.export_key().decode('utf-8')
-        self._send_control(addr, "PUBKEY", pub_pem)
+        pid = self._pid(addr)
+        session = self.manager.get_or_create(pid)
+        session.is_initiator = is_initiator
+        self._send_control(addr, "PUBKEY", self.public_key.export_key().decode('utf-8'))
+        session.mark_pubkey_sent()
 
     def _on_peer_disconnected(self, addr):
-        self.peer_public_keys.pop(addr, None)
-        self.session_keys.pop(addr, None)
-        self.ready.pop(addr, None)
-        self.is_initiator.pop(addr, None)
+        pid = self._pid(addr)
+        session = self.manager.get_or_create(pid)
+        session.invalidate()
+        self.manager.remove(pid)
 
     def handle_control_message(self, msg_type, sender, payload, addr):
+        """peer.py gọi hàm này khi nhận gói tin loại PUBKEY / KEY_EXCHANGE."""
+        pid = self._pid(addr)
+        session = self.manager.get_or_create(pid)
+
         if msg_type == "PUBKEY":
             from Crypto.PublicKey import RSA
-            self.peer_public_keys[addr] = RSA.import_key(payload)
+            session.set_peer_public_key(RSA.import_key(payload))
             print(f"[CryptoBridge] Đã nhận public key từ {addr}")
-            # CHỈ bên chủ động (initiator) mới tạo và gửi session key,
-            # tránh 2 bên cùng tạo khóa khác nhau (race condition gây lệch khóa)
-            if self.is_initiator.get(addr, False) and addr not in self.session_keys:
-                self._create_and_send_session_key(addr)
+
+            if session.is_initiator and session.session_key is None:
+                encrypted = session.generate_and_encrypt_session_key()
+                self._send_control(addr, "KEY_EXCHANGE", sp.encode_bytes(encrypted))
+                session.confirm_established()
+                print(f"[CryptoBridge] Đã tạo và gửi session key AES cho {addr}")
 
         elif msg_type == "KEY_EXCHANGE":
-            encrypted_key = base64.b64decode(payload)
-            session_key = rsa_decrypt(self.private_key, encrypted_key)
-            self.session_keys[addr] = session_key
-            self.ready[addr] = True
+            encrypted_key = sp.decode_bytes(payload)
+            session.receive_encrypted_session_key(self.private_key, encrypted_key)
             print(f"[CryptoBridge] Bắt tay hoàn tất với {addr} — sẵn sàng chat mã hóa")
-
-    def _create_and_send_session_key(self, addr):
-        if addr not in self.peer_public_keys:
-            return
-        session_key = generate_aes_key()
-        self.session_keys[addr] = session_key
-        encrypted = rsa_encrypt(self.peer_public_keys[addr], session_key)
-        payload = base64.b64encode(encrypted).decode('utf-8')
-        self._send_control(addr, "KEY_EXCHANGE", payload)
-        self.ready[addr] = True
-        print(f"[CryptoBridge] Đã tạo và gửi session key AES cho {addr}")
 
     def _send_control(self, addr, msg_type, payload):
         from protocol import create_message
@@ -73,37 +75,32 @@ class CryptoBridge:
                 pass
 
     def is_ready(self, addr):
-        return self.ready.get(addr, False)
+        return self.manager.get_or_create(self._pid(addr)).is_ready()
+
+    # ---------- ENCRYPT / DECRYPT (dùng session.protocol của B) ----------
 
     def _encrypt(self, text, addr):
-        if not self.is_ready(addr):
+        session = self.manager.get_or_create(self._pid(addr))
+        if not session.is_ready():
             return text
-        enc = aes_encrypt(self.session_keys[addr], text)
+        enc = aes_encrypt(session.session_key, text)
         signature = sign_message(self.private_key, text)
-        return json.dumps({
-            "nonce": base64.b64encode(enc["nonce"]).decode('utf-8'),
-            "ciphertext": base64.b64encode(enc["ciphertext"]).decode('utf-8'),
-            "tag": base64.b64encode(enc["tag"]).decode('utf-8'),
-            "signature": base64.b64encode(signature).decode('utf-8'),
-        })
+        msg = sp.build_chat_message(self.peer.my_name, enc, signature)
+        return sp.serialize_message(msg)
 
     def _decrypt(self, payload, addr):
-        if not self.is_ready(addr):
+        session = self.manager.get_or_create(self._pid(addr))
+        if not session.is_ready():
             return payload
         try:
-            data = json.loads(payload)
-            enc = {
-                "nonce": base64.b64decode(data["nonce"]),
-                "ciphertext": base64.b64decode(data["ciphertext"]),
-                "tag": base64.b64decode(data["tag"]),
-            }
-            plaintext = aes_decrypt(self.session_keys[addr], enc)
-
-            signature = base64.b64decode(data["signature"])
-            sender_pubkey = self.peer_public_keys.get(addr)
-            if sender_pubkey and not verify_signature(sender_pubkey, plaintext, signature):
-                return "[CẢNH BÁO] Chữ ký không hợp lệ - tin nhắn có thể bị giả mạo!"
-
+            msg = sp.parse_message(payload)
+            plaintext = sp.safe_decrypt_chat_message(session.session_key, msg)
+            signature = sp.extract_signature(msg)
+            if signature and session.peer_public_key:
+                if not verify_signature(session.peer_public_key, plaintext, signature):
+                    return "[CẢNH BÁO] Chữ ký không hợp lệ - tin nhắn có thể bị giả mạo!"
             return plaintext
+        except sp.CryptoProtocolError as e:
+            return f"[LỖI GIẢI MÃ] {e}"
         except Exception:
             return "[LỖI GIẢI MÃ]"
