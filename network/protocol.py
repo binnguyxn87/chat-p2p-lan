@@ -1,6 +1,7 @@
 import json
 import datetime
 
+
 def create_message(msg_type, sender, payload):
     message = {
         "type": msg_type,
@@ -10,9 +11,9 @@ def create_message(msg_type, sender, payload):
     }
     return json.dumps(message)
 
+
 def parse_message(raw_data):
     try:
         return json.loads(raw_data)
     except json.JSONDecodeError:
-        print("[LỖI] Không đọc được message, dữ liệu không đúng định dạng JSON")
         return None
